@@ -22,6 +22,7 @@ fn gate_outputs(cell: &Neurons, concat_input: &Array1<f32>) -> (Array1<f32>, Arr
     (f, i, c_tilde, o)
 }
 
+#[derive(Debug)]
 pub struct Neurons {
     w_f: Array2<f32>,
     w_i: Array2<f32>,
@@ -31,6 +32,28 @@ pub struct Neurons {
     b_i: Array1<f32>,
     b_c: Array1<f32>,
     b_o: Array1<f32>,
+}
+
+impl Neurons {
+    pub fn get_sum(&self) -> f32 {
+        self.w_f.iter().map(|x| x.powi(2)).sum::<f32>()
+        + self.w_i.iter().map(|x| x.powi(2)).sum::<f32>()
+        + self.w_c.iter().map(|x| x.powi(2)).sum::<f32>()
+        + self.w_o.iter().map(|x| x.powi(2)).sum::<f32>()
+        + self.b_f.iter().map(|x| x.powi(2)).sum::<f32>()
+        + self.b_i.iter().map(|x| x.powi(2)).sum::<f32>()
+        + self.b_c.iter().map(|x| x.powi(2)).sum::<f32>()
+        + self.b_o.iter().map(|x| x.powi(2)).sum::<f32>()
+    }
+
+    pub fn clip(&mut self, clip_coef: f32) {
+        for w in [&mut self.w_f, &mut self.w_i, &mut self.w_c, &mut self.w_o] {
+            *w *= clip_coef;
+        }
+        for b in [&mut self.b_f, &mut self.b_i, &mut self.b_c, &mut self.b_o] {
+            *b *= clip_coef;
+        }
+    }
 }
 
 pub struct LSTMCell {
@@ -89,7 +112,7 @@ impl LSTMCell {
         next_dh: &Array1<f32>,
         next_dc: &Array1<f32>,
         loss: &Array1<f32>,
-    ) -> (Array1<f32>, Array1<f32>, Array1<f32>) {
+    ) -> (Neurons, Array1<f32>, Array1<f32>, Array1<f32>) {
         let concat_input = x.iter().chain(prev_h.iter()).cloned().collect::<Array1<f32>>();
         let (f, i, c_tilde, o) = gate_outputs(&self.neurons, &concat_input);
     
@@ -117,27 +140,24 @@ impl LSTMCell {
         // Gradient with respect to previous h (for backpropagation through time)
         let dh_prev = dx.slice(s![self.neurons.w_f.ncols() - self.hidden_size..]);
 
-        let gradients = Neurons {
-            w_f: dw_f,
-            w_i: dw_i,
-            w_c: dw_c,
-            w_o: dw_o,
-            b_f: df,
-            b_i: di,
-            b_c: dc_tilde,
-            b_o: do_,
-        };
-       
-        self.update(&gradients);
-        
-        return (
+        (
+            Neurons {
+                w_f: dw_f,
+                w_i: dw_i,
+                w_c: dw_c,
+                w_o: dw_o,
+                b_f: df,
+                b_i: di,
+                b_c: dc_tilde,
+                b_o: do_,
+            },
             dx.slice(s![..self.neurons.w_f.ncols() - self.hidden_size]).to_owned(), 
             f * dc,
             dh_prev.to_owned()
-        );
+        )
     }
 
-    fn update(&mut self, grad: &Neurons) {
+    pub fn update(&mut self, grad: &Neurons) {
         let neurons = &mut self.neurons;
         // Update weights
         neurons.w_f = &neurons.w_f - self.learning_rate * &grad.w_f;
@@ -159,7 +179,6 @@ impl LSTMCell {
 
     pub fn load(&mut self, layer_weights: &Vec<Array2<f32>>) {
         let cell = &mut self.neurons;
-        println!("{:?}", layer_weights);
         cell.w_f = layer_weights[0].clone();
         cell.w_i = layer_weights[1].clone();
         cell.w_c = layer_weights[2].clone();

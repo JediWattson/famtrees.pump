@@ -1,4 +1,4 @@
-use crate::cell::LSTMCell;
+use crate::cell::{Neurons, LSTMCell};
 use ndarray::{s, Array1, Array2};
 use bincode::{serialize, deserialize};
 use std::fs::{File, read};
@@ -13,6 +13,22 @@ pub struct LSTMLayer {
     last_c: Array1<f32>,
 }
 
+
+fn gradient_clipping(gradients: &mut Vec<Neurons>, max_norm: f32) {
+    let total_norm = gradients.iter().fold(0.0, |sum, cell_grad| sum +  cell_grad.get_sum()).sqrt();
+    if total_norm > max_norm {
+        let clip_coef = max_norm / total_norm;
+        for cell_grad in gradients {
+            cell_grad.clip(clip_coef);
+        }
+    }
+}
+
+
+
+fn mse_loss(predictions: &Array2<f32>, targets: &Array2<f32>) -> f32 {
+    ((predictions - targets).mapv(|x| x * x)).sum() / (predictions.len() as f32)
+}
 
 fn mse_derivative(prediction: &Array1<f32>, target: &Array1<f32>) -> Array1<f32> {
     assert_eq!(prediction.len(), target.len(), "Single prediction and target must have the same length");
@@ -49,7 +65,7 @@ impl LSTMLayer {
         for t in (1..batch.len()).rev() {
             total_loss += self.backward(batch[t].to_owned(), t);        
         }
-        
+
         let _ = self.save_weights("weights.bin");
         total_loss
     } 
@@ -77,6 +93,8 @@ impl LSTMLayer {
 
 
     fn backward(&mut self, seq: Array2<f32>, step: usize) -> f32 {
+        let mut grads_seq = Vec::new(); 
+        let mut dx_seq = Array2::zeros((self.hidden_size, seq.ncols()));
         let mut dh = Array1::zeros(self.hidden_size);
         let mut dc = Array1::zeros(self.hidden_size); 
         let prev_h = &self.cached_hs[step-1];
@@ -84,18 +102,16 @@ impl LSTMLayer {
         let h = &self.cached_hs[step];
         let c = &self.cached_cs[step];
         
-        let mut total_loss = 0.0;
         for t in 1..seq.nrows() {
             let seq_h = h.row(t).to_owned();
             let seq_c = c.row(t).to_owned();
             let prev_seq_h = prev_h.row(t).to_owned();
             let prev_seq_c = prev_c.row(t).to_owned();
-           
+            
             let x_out = seq.column(t).to_owned();
-            let loss = mse_derivative(&seq_h, &x_out);
-
             let x_emb = seq.row(t).to_owned();
-            let (_, new_dc, new_dh) = self.cells[0].backward(
+            let loss = mse_derivative(&seq_h, &x_out);
+            let (grads, dx, new_dc, new_dh) = self.cells[0].backward(
                 &x_emb, 
                 &seq_c, 
                 &prev_seq_h, 
@@ -104,21 +120,27 @@ impl LSTMLayer {
                 &dc,
                 &loss, 
             );
-
-
+            dx_seq.slice_mut(s![t, ..]).assign(&dx);
             dh = new_dh;
-            dc = new_dc; 
+            dc = new_dc;
+            grads_seq.push(grads);
 
-            total_loss += loss.sum();
         }
 
-        total_loss
+        gradient_clipping(&mut grads_seq, 2.0);
+    
+        for gradient in grads_seq {
+            self.cells[0].update(&gradient);
+        }
+
+        mse_loss(&dx_seq, &seq)
     }
 
     fn save_weights(&self, filename: &str) -> Result<(), Box<dyn std::error::Error>> {
         let mut file = File::create(filename)?;
         let weights: Vec<Vec<Array2<f32>>> = self.cells.iter()
             .map(|cell| { cell.save() }).collect();
+        
         let serialized = serialize(&weights)?;
         file.write_all(&serialized)?;
         Ok(())
@@ -132,6 +154,7 @@ impl LSTMLayer {
             return Err("Mismatch in number of layers between saved and current model".into());
         }
 
+        println!("load {:?}", weights);
         for (cell, layer_weights) in self.cells.iter_mut().zip(weights.into_iter()) {
             if layer_weights.len() != 4 {
                 return Err("Incorrect number of weight matrices for LSTM cell".into());

@@ -46,7 +46,7 @@ struct LogQueue {
 
 fn main() {
     let vocab_dim = 128;
-    let hidden_dim = 20; 
+    let hidden_dim = 40; 
     let log_embedding = Array2::random((vocab_dim, hidden_dim), Uniform::new(0., 1.));
     let data_file = File::open("../data.bin").expect("Failed to open file");
     let mut reader = BufReader::new(data_file);
