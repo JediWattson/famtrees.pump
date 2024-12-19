@@ -1,0 +1,13 @@
+syntax = "proto3";
+
+message BondingCurveData {
+  repeated int32 mintId = 1;
+  double priceInSol = 2;
+  uint64 slot = 3;
+}
+
+message LogData {
+  uint64 slot = 1;
+  repeated int32 tokenizedLogs = 2;
+}
+
