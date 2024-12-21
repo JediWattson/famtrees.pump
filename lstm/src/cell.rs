@@ -22,7 +22,7 @@ fn gate_outputs(cell: &Neurons, concat_input: &Array1<f32>) -> (Array1<f32>, Arr
     (f, i, c_tilde, o)
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Neurons {
     w_f: Array2<f32>,
     w_i: Array2<f32>,
@@ -46,20 +46,23 @@ impl Neurons {
         + self.b_o.iter().map(|x| x.powi(2)).sum::<f32>()
     }
 
-    pub fn clip(&mut self, clip_coef: f32) {
-        for w in [&mut self.w_f, &mut self.w_i, &mut self.w_c, &mut self.w_o] {
-            *w *= clip_coef;
-        }
-        for b in [&mut self.b_f, &mut self.b_i, &mut self.b_c, &mut self.b_o] {
-            *b *= clip_coef;
+    pub fn clip(&self, clip_coef: f32) -> Neurons {
+        Neurons { 
+            w_f: &self.w_f * clip_coef,
+            w_i: &self.w_i * clip_coef,
+            w_c: &self.w_c * clip_coef,
+            w_o: &self.w_o * clip_coef,
+
+            b_f: &self.b_f * clip_coef,
+            b_i: &self.b_i * clip_coef,
+            b_c: &self.b_c * clip_coef,
+            b_o: &self.b_o * clip_coef,
         }
     }
 }
 
 pub struct LSTMCell {
     neurons: Neurons,
-    hidden_size: usize,
-    learning_rate: f32
 }
 
 impl LSTMCell {
@@ -68,8 +71,6 @@ impl LSTMCell {
         let bias_init = || Array1::random(hidden_size, Uniform::new(-0.1, 0.1));
 
         LSTMCell {
-            hidden_size,
-            learning_rate: 0.01,
             neurons: Neurons {
                 w_f: weight_init(),
                 w_i: weight_init(),
@@ -91,7 +92,6 @@ impl LSTMCell {
     ) -> (Array1<f32>, Array1<f32>) {
         let neurons = &self.neurons;
         let concat_input = x.iter().chain(prev_h.iter()).cloned().collect::<Array1<f32>>();
-        
         let f = (neurons.w_f.dot(&concat_input) + &neurons.b_f).mapv(|x| 1.0 / (1.0 + (-x).exp()));
         let i = (neurons.w_i.dot(&concat_input) + &neurons.b_i).mapv(|x| 1.0 / (1.0 + (-x).exp()));
         let o = (neurons.w_o.dot(&concat_input) + &neurons.b_o).mapv(|x| 1.0 / (1.0 + (-x).exp()));
@@ -104,14 +104,14 @@ impl LSTMCell {
     }
 
     pub fn backward(
-        &mut self,
+        &self,
         x: &Array1<f32>,
         c: &Array1<f32>,
         prev_h: &Array1<f32>,
         prev_c: &Array1<f32>,
+        loss: &Array1<f32>,
         next_dh: &Array1<f32>,
         next_dc: &Array1<f32>,
-        loss: &Array1<f32>,
     ) -> (Neurons, Array1<f32>, Array1<f32>, Array1<f32>) {
         let concat_input = x.iter().chain(prev_h.iter()).cloned().collect::<Array1<f32>>();
         let (f, i, c_tilde, o) = gate_outputs(&self.neurons, &concat_input);
@@ -137,8 +137,7 @@ impl LSTMCell {
             + self.neurons.w_c.t().dot(&dc_tilde) 
             + self.neurons.w_o.t().dot(&do_);
         
-        // Gradient with respect to previous h (for backpropagation through time)
-        let dh_prev = dx.slice(s![self.neurons.w_f.ncols() - self.hidden_size..]);
+        let input_size = self.neurons.w_f.ncols() - self.neurons.w_f.nrows();
 
         (
             Neurons {
@@ -151,25 +150,25 @@ impl LSTMCell {
                 b_c: dc_tilde,
                 b_o: do_,
             },
-            dx.slice(s![..self.neurons.w_f.ncols() - self.hidden_size]).to_owned(), 
+            dx.slice(s![..input_size]).to_owned(), 
             f * dc,
-            dh_prev.to_owned()
+            dx.slice(s![input_size..]).to_owned()
         )
     }
 
-    pub fn update(&mut self, grad: &Neurons) {
+    pub fn update(&mut self, grad: &Neurons, learning_rate: f32) {
         let neurons = &mut self.neurons;
         // Update weights
-        neurons.w_f = &neurons.w_f - self.learning_rate * &grad.w_f;
-        neurons.w_i = &neurons.w_i - self.learning_rate * &grad.w_i;
-        neurons.w_c = &neurons.w_c - self.learning_rate * &grad.w_c;
-        neurons.w_o = &neurons.w_o - self.learning_rate * &grad.w_o;
+        neurons.w_f = &neurons.w_f - learning_rate * &grad.w_f;
+        neurons.w_i = &neurons.w_i -learning_rate * &grad.w_i;
+        neurons.w_c = &neurons.w_c - learning_rate * &grad.w_c;
+        neurons.w_o = &neurons.w_o - learning_rate * &grad.w_o;
 
         // Update biases
-        neurons.b_f = &neurons.b_f - self.learning_rate * &grad.b_f;
-        neurons.b_i = &neurons.b_i - self.learning_rate * &grad.b_i;
-        neurons.b_c = &neurons.b_c - self.learning_rate * &grad.b_c;
-        neurons.b_o = &neurons.b_o - self.learning_rate * &grad.b_o;
+        neurons.b_f = &neurons.b_f - learning_rate * &grad.b_f;
+        neurons.b_i = &neurons.b_i - learning_rate * &grad.b_i;
+        neurons.b_c = &neurons.b_c - learning_rate * &grad.b_c;
+        neurons.b_o = &neurons.b_o - learning_rate * &grad.b_o;
     }
     
     pub fn save(&self) -> Vec<Array2<f32>>  {

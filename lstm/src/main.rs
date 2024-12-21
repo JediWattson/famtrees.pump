@@ -46,8 +46,11 @@ struct LogQueue {
 
 fn main() {
     let vocab_dim = 128;
-    let hidden_dim = 40; 
+    let hidden_dim = 8; 
+
+    let price_embedding = PriceEmbedding::new(1, hidden_dim);
     let log_embedding = Array2::random((vocab_dim, hidden_dim), Uniform::new(0., 1.));
+    
     let data_file = File::open("../data.bin").expect("Failed to open file");
     let mut reader = BufReader::new(data_file);
     let mut log_q: Queue<LogQueue> = Queue::new();
@@ -89,10 +92,8 @@ fn main() {
                             for row in mint_e.rows() {
                                 let _ = combined_e.push(Axis(0), row); 
                             }
-                            let price_embedding = PriceEmbedding::new(1, hidden_dim);
                             let price_weights = price_embedding.forward(bonding.priceInSol as f32); 
                             let _ = combined_e.push(Axis(0), price_weights.view());
-
                             let _ = data.push(combined_e);
                         }
 
@@ -112,7 +113,8 @@ fn main() {
     let epochs = 100;
     let batch_size = 32; 
     let input_dim = 250;
-    let mut lstm_layer = LSTMLayer::new(input_dim, hidden_dim);
+    let learning_rate = 0.01;
+    let mut lstm_layer = LSTMLayer::new(input_dim, hidden_dim, learning_rate);
     let _ = lstm_layer.load_weights("weights.bin");
 
     for epoch in 0..epochs {

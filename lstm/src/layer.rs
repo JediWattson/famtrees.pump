@@ -6,25 +6,10 @@ use std::io::Write;
 
 pub struct LSTMLayer {
     hidden_size: usize,
+    input_size: usize,
+    learning_rate: f32,
     cells: Vec<LSTMCell>,
-    cached_hs: Vec<Array2<f32>>,
-    cached_cs: Vec<Array2<f32>>,
-    last_h: Array1<f32>,
-    last_c: Array1<f32>,
 }
-
-
-fn gradient_clipping(gradients: &mut Vec<Neurons>, max_norm: f32) {
-    let total_norm = gradients.iter().fold(0.0, |sum, cell_grad| sum +  cell_grad.get_sum()).sqrt();
-    if total_norm > max_norm {
-        let clip_coef = max_norm / total_norm;
-        for cell_grad in gradients {
-            cell_grad.clip(clip_coef);
-        }
-    }
-}
-
-
 
 fn mse_loss(predictions: &Array2<f32>, targets: &Array2<f32>) -> f32 {
     ((predictions - targets).mapv(|x| x * x)).sum() / (predictions.len() as f32)
@@ -37,103 +22,148 @@ fn mse_derivative(prediction: &Array1<f32>, target: &Array1<f32>) -> Array1<f32>
 }
 
 impl LSTMLayer {
-    pub fn new(input_size: usize, hidden_size: usize) -> Self {
-        let cells = std::iter::repeat_with(|| LSTMCell::new(input_size, hidden_size))
+    pub fn new(input_size: usize, hidden_size: usize, learning_rate: f32) -> Self {
+        let cells = std::iter::repeat_with(|| LSTMCell::new(hidden_size, hidden_size))
             .take(1) // Single layer, but could be expanded for stacked layers
             .collect();
         
-        LSTMLayer { 
+        LSTMLayer {
+            learning_rate,
             cells, 
             hidden_size,
-            cached_hs: Vec::new(),
-            cached_cs: Vec::new(),
-            last_h: Array1::zeros(hidden_size),
-            last_c: Array1::zeros(hidden_size),
+            input_size,
         }
     }
  
     pub fn train(&mut self, batch: &Vec<Array2<f32>>) -> f32 {
         println!("Forward Started!");
+        let mut cached_hs = Vec::new();
+        let mut cached_cs = Vec::new();
+        let mut h = Array1::<f32>::zeros(self.hidden_size);
+        let mut c = Array1::<f32>::zeros(self.hidden_size);
         for sequence in batch {
-            let (hs, cs) = self.forward(&sequence);
-            self.cached_hs.push(hs);
-            self.cached_cs.push(cs); 
+            let (hs, cs, next_h, next_c) = self.forward(&sequence, &h, &c);
+            h = next_h;
+            c = next_c;
+            cached_hs.push(hs);
+            cached_cs.push(cs);
         }
         
         println!("Backward Prop Started!");
         let mut total_loss = 0.0;
         for t in (1..batch.len()).rev() {
-            total_loss += self.backward(batch[t].to_owned(), t);        
-        }
+            let target = &batch[t];
+            let grads_seq = self.backward(
+                target,
+                &cached_hs,
+                &cached_cs,
+                t
+            );        
 
+            self.update(&grads_seq);
+            let mut prediction = Array2::<f32>::zeros((self.hidden_size, self.input_size));
+            for (i, predictor) in cached_hs[t].iter().enumerate() {
+                prediction.slice_mut(s![.., i]).assign(predictor);
+            }
+
+            total_loss += mse_loss(target, &prediction);
+        }
         let _ = self.save_weights("weights.bin");
         total_loss
     } 
 
-    fn forward(&mut self, sequence: &Array2<f32>) -> (Array2<f32>, Array2<f32>) {
-        let seq_len = sequence.nrows();
-        let mut h = self.last_h.clone();
-        let mut c = self.last_c.clone();
-        let mut hs = Array2::<f32>::zeros((self.hidden_size, seq_len));
-        let mut cs = Array2::<f32>::zeros((self.hidden_size, seq_len));
+    fn forward(
+        &self, 
+        sequence: &Array2<f32>, 
+        last_h: &Array1<f32>, 
+        last_c: &Array1<f32>
+    ) -> (
+        Vec<Array1<f32>>, 
+        Vec<Array1<f32>>, 
+        Array1<f32>, 
+        Array1<f32>
+    ) {
+        let mut hs: Vec<Array1<f32>> = Vec::new();
+        let mut cs: Vec<Array1<f32>> = Vec::new();
+        let mut h = last_h.clone();
+        let mut c = last_c.clone();
+        for t in 0..self.input_size {
+            let x = &sequence.column(t).to_owned();
+            for cell in &self.cells {
+                let (new_h, new_c) = cell.forward(x, &h, &c);
+                hs.push(new_h.clone());
+                cs.push(new_c.clone());
+                h = new_h;
+                c = new_c;
 
-        for t in 0..seq_len {
-            let x = sequence.row(t).to_owned();
-            let (new_h, new_c) = self.cells[0].forward(&x, &h, &c);
-            h = new_h;
-            c = new_c;
-            hs.slice_mut(s![.., t]).assign(&h);
-            cs.slice_mut(s![.., t]).assign(&c);
+            }
+
         }
 
-        self.last_h = h;
-        self.last_c = c;
-        (hs, cs)
+        (hs, cs, c, h)
     }
 
 
-    fn backward(&mut self, seq: Array2<f32>, step: usize) -> f32 {
+    fn backward(
+        &mut self, 
+        target: &Array2<f32>,
+        cached_hs: &Vec<Vec<Array1<f32>>>,
+        cached_cs: &Vec<Vec<Array1<f32>>>,
+        step: usize
+    ) -> Vec<Neurons> {
+       
         let mut grads_seq = Vec::new(); 
-        let mut dx_seq = Array2::zeros((self.hidden_size, seq.ncols()));
         let mut dh = Array1::zeros(self.hidden_size);
         let mut dc = Array1::zeros(self.hidden_size); 
-        let prev_h = &self.cached_hs[step-1];
-        let prev_c = &self.cached_cs[step-1]; 
-        let h = &self.cached_hs[step];
-        let c = &self.cached_cs[step];
         
-        for t in 1..seq.nrows() {
-            let seq_h = h.row(t).to_owned();
-            let seq_c = c.row(t).to_owned();
-            let prev_seq_h = prev_h.row(t).to_owned();
-            let prev_seq_c = prev_c.row(t).to_owned();
-            
-            let x_out = seq.column(t).to_owned();
-            let x_emb = seq.row(t).to_owned();
-            let loss = mse_derivative(&seq_h, &x_out);
-            let (grads, dx, new_dc, new_dh) = self.cells[0].backward(
-                &x_emb, 
-                &seq_c, 
-                &prev_seq_h, 
-                &prev_seq_c, 
-                &dh, 
-                &dc,
-                &loss, 
-            );
-            dx_seq.slice_mut(s![t, ..]).assign(&dx);
-            dh = new_dh;
-            dc = new_dc;
-            grads_seq.push(grads);
-
-        }
-
-        gradient_clipping(&mut grads_seq, 2.0);
+        let prev_h = &cached_hs[step-1];
+        let prev_c = &cached_cs[step-1]; 
+        let h = &cached_hs[step];
+        let c = &cached_cs[step];
     
-        for gradient in grads_seq {
-            self.cells[0].update(&gradient);
-        }
+        for t in 1..self.input_size {
+            let x_target = target.column(t).to_owned();
 
-        mse_loss(&dx_seq, &seq)
+            let seq_h = h[t].to_owned();
+            let seq_c = c[t].to_owned();
+            let prev_seq_h = prev_h[t].to_owned();
+            let prev_seq_c = prev_c[t].to_owned();
+            let loss_x = mse_derivative(&seq_h, &x_target);
+            
+            for cell in &self.cells {
+                let (grad_h, _, new_dc, new_dh) = cell.backward(
+                    &seq_h, 
+                    &seq_c, 
+                    &prev_seq_h, 
+                    &prev_seq_c, 
+                    &loss_x, 
+                    &dh, 
+                    &dc,
+                );
+
+                dh = new_dh;
+                dc = new_dc;
+                grads_seq.push(grad_h);
+            }
+        }
+        grads_seq
+    }
+
+    fn update(&mut self, gradients: &Vec<Neurons>) {
+        let max_norm: f32 = 2.0;   
+        let min_norm: f32 = 0.1;
+        for g_h in gradients { 
+            let total_norm = g_h.get_sum().sqrt();
+            assert!(!(total_norm.is_nan() || total_norm.is_infinite()), "NOT A NUMBER");
+           
+            let clip_h = if total_norm > max_norm {
+                &g_h.clip(max_norm / total_norm)
+            } else if total_norm < min_norm {
+                &g_h.clip(min_norm / total_norm)
+            } else { g_h };
+
+            self.cells[0].update(&clip_h, self.learning_rate);
+        }
     }
 
     fn save_weights(&self, filename: &str) -> Result<(), Box<dyn std::error::Error>> {
@@ -154,7 +184,6 @@ impl LSTMLayer {
             return Err("Mismatch in number of layers between saved and current model".into());
         }
 
-        println!("load {:?}", weights);
         for (cell, layer_weights) in self.cells.iter_mut().zip(weights.into_iter()) {
             if layer_weights.len() != 4 {
                 return Err("Incorrect number of weight matrices for LSTM cell".into());
