@@ -1,12 +1,15 @@
-use crate::cell::{Neurons, LSTMCell};
-use ndarray::{s, Array1, Array2};
-use bincode::{serialize, deserialize};
 use std::fs::{File, read};
 use std::io::Write;
+use ndarray::{Axis, Array1, Array2};
+use bincode::{serialize, deserialize};
+use crate::cell::{average_gradients_over_time, Neurons, LSTMCell};
+use crate::embeddings::{Embedding, EmbeddingGrads};
 
 pub struct LSTMLayer {
+    token_embedding: Embedding,
+    dense_embedding: Embedding,
     hidden_size: usize,
-    input_size: usize,
+    vocab_size: usize,
     learning_rate: f32,
     cells: Vec<LSTMCell>,
 }
@@ -22,148 +25,188 @@ fn mse_derivative(prediction: &Array1<f32>, target: &Array1<f32>) -> Array1<f32>
 }
 
 impl LSTMLayer {
-    pub fn new(input_size: usize, hidden_size: usize, learning_rate: f32) -> Self {
+    pub fn new() -> Self {
+        let vocab_size = 128;
+        //let input_size = 296;
+        let hidden_size = 32;   
+        let learning_rate = 0.0001;
+        
+        let token_embedding = Embedding::new(vocab_size, hidden_size);
+        let dense_embedding = Embedding::new(hidden_size, vocab_size);
         let cells = std::iter::repeat_with(|| LSTMCell::new(hidden_size, hidden_size))
             .take(1) // Single layer, but could be expanded for stacked layers
             .collect();
         
         LSTMLayer {
-            learning_rate,
             cells, 
+            token_embedding,
+            dense_embedding,
+            learning_rate,
             hidden_size,
-            input_size,
+            vocab_size,
         }
     }
- 
-    pub fn train(&mut self, batch: &Vec<Array2<f32>>) -> f32 {
+
+    pub fn embedding(&self, data: &Vec<f32>) -> Vec<Array1<f32>> {
+        data.iter().map(|token| {
+            let mut one_hot = Array1::zeros(self.vocab_size);
+            one_hot[*token as usize] = 1.0;
+            self.token_embedding.forward(&one_hot)
+        }).collect()
+    }
+
+    pub fn train(&mut self, batch: &[Vec<f32>]) {
         println!("Forward Started!");
         let mut cached_hs = Vec::new();
         let mut cached_cs = Vec::new();
+        let mut os = Vec::new();
         let mut h = Array1::<f32>::zeros(self.hidden_size);
         let mut c = Array1::<f32>::zeros(self.hidden_size);
         for sequence in batch {
-            let (hs, cs, next_h, next_c) = self.forward(&sequence, &h, &c);
+            let tokens = self.embedding(sequence);
+            let (o, hs, cs, next_h, next_c) = self.forward(&tokens, &h, &c);
             h = next_h;
             c = next_c;
             cached_hs.push(hs);
             cached_cs.push(cs);
+            os.push(o);
         }
-        
+
         println!("Backward Prop Started!");
         let mut total_loss = 0.0;
-        for t in (1..batch.len()).rev() {
-            let target = &batch[t];
-            let grads_seq = self.backward(
-                target,
+        for t in 1..batch.len() {
+            let (grads_seq, loss) = self.backward(
+                &batch[t],
+                &os[t],
                 &cached_hs,
                 &cached_cs,
                 t
-            );        
-
+            );
             self.update(&grads_seq);
-            let mut prediction = Array2::<f32>::zeros((self.hidden_size, self.input_size));
-            for (i, predictor) in cached_hs[t].iter().enumerate() {
-                prediction.slice_mut(s![.., i]).assign(predictor);
-            }
-
-            total_loss += mse_loss(target, &prediction);
+            total_loss += loss;
         }
+       
+        println!("saving");
         let _ = self.save_weights("weights.bin");
-        total_loss
+        println!("Loss: {}", total_loss/(batch.len() as f32));
     } 
 
     fn forward(
         &self, 
-        sequence: &Array2<f32>, 
+        sequence: &Vec<Array1<f32>>,
         last_h: &Array1<f32>, 
         last_c: &Array1<f32>
-    ) -> (
-        Vec<Array1<f32>>, 
-        Vec<Array1<f32>>, 
+    ) -> ( 
+        Vec<Array1<f32>>,
+        Vec<Vec<Array1<f32>>>,
+        Vec<Vec<Array1<f32>>>,
         Array1<f32>, 
-        Array1<f32>
+        Array1<f32>, 
     ) {
-        let mut hs: Vec<Array1<f32>> = Vec::new();
-        let mut cs: Vec<Array1<f32>> = Vec::new();
+        let mut hs = Vec::new();
+        let mut cs = Vec::new();
         let mut h = last_h.clone();
         let mut c = last_c.clone();
-        for t in 0..self.input_size {
-            let x = &sequence.column(t).to_owned();
+        let mut os = Vec::new();
+        for vec in sequence {
+            let mut hs_x = Vec::new();
+            let mut cs_x = Vec::new();
             for cell in &self.cells {
-                let (new_h, new_c) = cell.forward(x, &h, &c);
-                hs.push(new_h.clone());
-                cs.push(new_c.clone());
+                let (new_h, new_c) = cell.forward(vec, &h, &c);
                 h = new_h;
                 c = new_c;
-
+                hs_x.push(h.clone());
+                cs_x.push(c.clone());
             }
-
+            let o = self.dense_embedding.forward(&h);
+            hs.push(hs_x);
+            cs.push(cs_x);
+            os.push(o);
         }
 
-        (hs, cs, c, h)
+        (os, hs, cs, h, c)
     }
 
-
     fn backward(
-        &mut self, 
-        target: &Array2<f32>,
-        cached_hs: &Vec<Vec<Array1<f32>>>,
-        cached_cs: &Vec<Vec<Array1<f32>>>,
+        &mut self,
+        target: &Vec<f32>,
+        output: &Vec<Array1<f32>>,
+        cached_hs: &Vec<Vec<Vec<Array1<f32>>>>,
+        cached_cs: &Vec<Vec<Vec<Array1<f32>>>>,
         step: usize
-    ) -> Vec<Neurons> {
-       
+    ) -> (Vec<(EmbeddingGrads, Neurons, EmbeddingGrads)>, f32) {       
         let mut grads_seq = Vec::new(); 
+      
         let mut dh = Array1::zeros(self.hidden_size);
         let mut dc = Array1::zeros(self.hidden_size); 
-        
-        let prev_h = &cached_hs[step-1];
-        let prev_c = &cached_cs[step-1]; 
-        let h = &cached_hs[step];
-        let c = &cached_cs[step];
-    
-        for t in 1..self.input_size {
-            let x_target = target.column(t).to_owned();
+ 
+        let prev_hs = &cached_hs[step-1];
+        let prev_cs = &cached_cs[step-1]; 
+        let hs = &cached_hs[step];
+        let cs = &cached_cs[step];
+        let mut loss = 0.0;
 
-            let seq_h = h[t].to_owned();
-            let seq_c = c[t].to_owned();
-            let prev_seq_h = prev_h[t].to_owned();
-            let prev_seq_c = prev_c[t].to_owned();
-            let loss_x = mse_derivative(&seq_h, &x_target);
+        for (i, token) in target.iter().enumerate().rev() {
+            let mut grads_dx = Array2::zeros((self.cells.len(), self.hidden_size));
+            let mut grads_h = Vec::new();
             
-            for cell in &self.cells {
-                let (grad_h, _, new_dc, new_dh) = cell.backward(
-                    &seq_h, 
-                    &seq_c, 
-                    &prev_seq_h, 
-                    &prev_seq_c, 
-                    &loss_x, 
+            let mut one_hot = Array1::zeros(self.vocab_size);
+            one_hot[*token as usize] = 1.0;
+            loss += (&output[i] - &one_hot).mapv(|x| x.powi(2)).sum() / 2.0;
+            let loss_x = &output[i] - &one_hot;
+            
+            let mut one_hot_d = Array2::<f32>::zeros((self.vocab_size, self.vocab_size));
+            one_hot_d.row_mut(*token as usize).assign(&output[i]);
+            let grads_d = self.dense_embedding.backward(&one_hot_d, &loss_x);
+            for (j, cell) in self.cells.iter().enumerate() {
+                let (grad_h, dx, new_dc, new_dh) = cell.backward(
+                    &hs[i][j], 
+                    &cs[i][j], 
+                    &prev_hs[i][j], 
+                    &prev_cs[i][j], 
+                    &grads_d.2, 
                     &dh, 
                     &dc,
                 );
-
+                
                 dh = new_dh;
                 dc = new_dc;
-                grads_seq.push(grad_h);
+                grads_dx.row_mut(j).assign(&dx);
+                grads_h.push(grad_h);
             }
+
+            let avg_h = average_gradients_over_time(&grads_h);
+            let avg_dx = grads_dx.mean_axis(Axis(0)).unwrap();
+            let token_emb = self.token_embedding.forward(&one_hot);
+            let mut one_hot_e = Array2::<f32>::zeros((self.vocab_size, self.hidden_size));
+            one_hot_e.row_mut(*token as usize).assign(&token_emb);
+            let grads_i = self.token_embedding.backward(&one_hot_e, &avg_dx);
+
+            grads_seq.push((grads_d, avg_h, grads_i));
         }
-        grads_seq
+
+        (grads_seq, loss / (target.len() as f32))
     }
 
-    fn update(&mut self, gradients: &Vec<Neurons>) {
+    fn update(&mut self, gradients: &Vec<(EmbeddingGrads, Neurons, EmbeddingGrads)> ) {
         let max_norm: f32 = 2.0;   
         let min_norm: f32 = 0.1;
-        for g_h in gradients { 
+        for (g_d, g_h, g_e) in gradients {
+            //self.dense_embedding.update(&g_d.0, &g_d.1, self.learning_rate);
             let total_norm = g_h.get_sum().sqrt();
             assert!(!(total_norm.is_nan() || total_norm.is_infinite()), "NOT A NUMBER");
-           
             let clip_h = if total_norm > max_norm {
                 &g_h.clip(max_norm / total_norm)
             } else if total_norm < min_norm {
                 &g_h.clip(min_norm / total_norm)
             } else { g_h };
+            
+            for cell in &mut self.cells {
+                cell.update(&clip_h, self.learning_rate);
+            }
 
-            self.cells[0].update(&clip_h, self.learning_rate);
-        }
+            //self.token_embedding.update(&g_e.0, &g_e.1, self.learning_rate);
+       }
     }
 
     fn save_weights(&self, filename: &str) -> Result<(), Box<dyn std::error::Error>> {

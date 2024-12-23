@@ -1,6 +1,7 @@
 use ndarray::{s, Array1, Array2};
 use ndarray_rand::RandomExt;
 use ndarray_rand::rand_distr::Uniform;
+use std::ops;
 
 fn outer(a: &Array1<f32>, b: &Array1<f32>) -> Array2<f32> {
     let m = a.len();
@@ -13,6 +14,37 @@ fn outer(a: &Array1<f32>, b: &Array1<f32>) -> Array2<f32> {
     }
     result
 }
+
+
+pub fn average_gradients_over_time(gradients: &[Neurons]) -> Neurons {
+    let num_steps = gradients.len() as f32;
+
+    let zero_grad = Neurons {
+        w_f: Array2::zeros(gradients[0].w_f.dim()),
+        w_i: Array2::zeros(gradients[0].w_i.dim()),
+        w_c: Array2::zeros(gradients[0].w_c.dim()),
+        w_o: Array2::zeros(gradients[0].w_o.dim()),
+        b_f: Array1::zeros(gradients[0].b_f.len()),
+        b_i: Array1::zeros(gradients[0].b_i.len()),
+        b_c: Array1::zeros(gradients[0].b_c.len()),
+        b_o: Array1::zeros(gradients[0].b_o.len()),
+    };
+
+    let summed_grads = gradients.iter().fold(zero_grad, |mut acc, grad| {
+        acc.w_f += &grad.w_f;
+        acc.w_i += &grad.w_i;
+        acc.w_c += &grad.w_c;
+        acc.w_o += &grad.w_o;
+        acc.b_f += &grad.b_f;
+        acc.b_i += &grad.b_i;
+        acc.b_c += &grad.b_c;
+        acc.b_o += &grad.b_o;
+        acc
+    });
+    
+    summed_grads / num_steps
+}
+
 
 fn gate_outputs(cell: &Neurons, concat_input: &Array1<f32>) -> (Array1<f32>, Array1<f32>, Array1<f32>, Array1<f32>) {
     let f = (cell.w_f.dot(concat_input) + &cell.b_f).mapv(|x| 1.0 / (1.0 + (-x).exp()));
@@ -32,6 +64,30 @@ pub struct Neurons {
     b_i: Array1<f32>,
     b_c: Array1<f32>,
     b_o: Array1<f32>,
+}
+
+impl ops::Div<f32> for Neurons {
+    type Output = Neurons;
+    fn div(self, rhs: f32) -> Self::Output { 
+        Neurons {
+            w_f: self.w_f / rhs,
+            w_i: self.w_i / rhs,
+            w_c: self.w_c / rhs,
+            w_o: self.w_o / rhs, 
+            b_f: self.b_f / rhs,
+            b_i: self.b_i / rhs,
+            b_c: self.b_c / rhs,
+            b_o: self.b_o / rhs,
+        }  
+
+    }
+
+}
+
+impl Iterator for Neurons {
+    type Item = Neurons;
+    fn next(&mut self) -> Option<Self::Item> {
+        Some(self.clone())}    
 }
 
 impl Neurons {
@@ -59,7 +115,7 @@ impl Neurons {
             b_o: &self.b_o * clip_coef,
         }
     }
-}
+  }
 
 pub struct LSTMCell {
     neurons: Neurons,
