@@ -29,7 +29,7 @@ impl LSTMLayer {
         let vocab_size = 128;
         //let input_size = 296;
         let hidden_size = 32;   
-        let learning_rate = 0.0001;
+        let learning_rate = 0.00001;
         
         let token_embedding = Embedding::new(vocab_size, hidden_size);
         let dense_embedding = Embedding::new(hidden_size, vocab_size);
@@ -82,7 +82,7 @@ impl LSTMLayer {
                 &cached_cs,
                 t
             );
-            self.update(&grads_seq);
+            self.update(&batch[t], &grads_seq);
             total_loss += loss;
         }
        
@@ -155,8 +155,8 @@ impl LSTMLayer {
             loss += (&output[i] - &one_hot).mapv(|x| x.powi(2)).sum() / 2.0;
             let loss_x = &output[i] - &one_hot;
             
-            let mut one_hot_d = Array2::<f32>::zeros((self.vocab_size, self.vocab_size));
-            one_hot_d.row_mut(*token as usize).assign(&output[i]);
+            let mut one_hot_d = Array2::<f32>::zeros((self.vocab_size, 1));
+            one_hot_d.column_mut(0).assign(&output[i]);
             let grads_d = self.dense_embedding.backward(&one_hot_d, &loss_x);
             for (j, cell) in self.cells.iter().enumerate() {
                 let (grad_h, dx, new_dc, new_dh) = cell.backward(
@@ -178,8 +178,8 @@ impl LSTMLayer {
             let avg_h = average_gradients_over_time(&grads_h);
             let avg_dx = grads_dx.mean_axis(Axis(0)).unwrap();
             let token_emb = self.token_embedding.forward(&one_hot);
-            let mut one_hot_e = Array2::<f32>::zeros((self.vocab_size, self.hidden_size));
-            one_hot_e.row_mut(*token as usize).assign(&token_emb);
+            let mut one_hot_e = Array2::<f32>::zeros((self.hidden_size, self.vocab_size));
+            one_hot_e.column_mut(*token as usize).assign(&token_emb);
             let grads_i = self.token_embedding.backward(&one_hot_e, &avg_dx);
 
             grads_seq.push((grads_d, avg_h, grads_i));
@@ -188,11 +188,16 @@ impl LSTMLayer {
         (grads_seq, loss / (target.len() as f32))
     }
 
-    fn update(&mut self, gradients: &Vec<(EmbeddingGrads, Neurons, EmbeddingGrads)> ) {
+    fn update(&mut self, tokens: &Vec<f32>,  gradients: &Vec<(EmbeddingGrads, Neurons, EmbeddingGrads)> ) {
         let max_norm: f32 = 2.0;   
         let min_norm: f32 = 0.1;
-        for (g_d, g_h, g_e) in gradients {
-            //self.dense_embedding.update(&g_d.0, &g_d.1, self.learning_rate);
+        for (i, (g_d, g_h, g_e)) in gradients.iter().enumerate() {
+            let token = tokens[i];
+            let mut one_hot_d = Array2::<f32>::zeros((self.vocab_size, 1));     
+            //println!("{:?}", g_d.0.shape());
+            one_hot_d.column_mut(0).assign(&g_d.0);   
+            self.dense_embedding.update(&one_hot_d, &g_d.1, self.learning_rate);
+            
             let total_norm = g_h.get_sum().sqrt();
             assert!(!(total_norm.is_nan() || total_norm.is_infinite()), "NOT A NUMBER");
             let clip_h = if total_norm > max_norm {
@@ -205,7 +210,10 @@ impl LSTMLayer {
                 cell.update(&clip_h, self.learning_rate);
             }
 
-            //self.token_embedding.update(&g_e.0, &g_e.1, self.learning_rate);
+            let mut one_hot_e = Array2::<f32>::zeros((self.hidden_size, self.vocab_size));
+            //println!("{:?}", g_e.0.shape());
+            one_hot_e.row_mut(token as usize).assign(&g_e.0);  
+            self.token_embedding.update(&one_hot_e, &g_e.1, self.learning_rate);
        }
     }
 

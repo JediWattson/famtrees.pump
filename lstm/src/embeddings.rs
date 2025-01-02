@@ -1,4 +1,4 @@
-use ndarray::{Array1, Array2};
+use ndarray::{Array1, Array2, Axis};
 use ndarray_rand::rand_distr::Uniform;
 use ndarray_rand::RandomExt;
 
@@ -14,7 +14,7 @@ fn outer(a: &Array1<f32>, b: &Array1<f32>) -> Array2<f32> {
     result
 }
 
-pub type EmbeddingGrads = (Array1<f32>, Array1<f32>, Array1<f32>); 
+pub type EmbeddingGrads = (Array2<f32>, Array1<f32>, Array1<f32>); 
 
 #[derive(Clone)]
 pub struct EmbeddingLayer {
@@ -40,14 +40,17 @@ impl Embedding {
     } 
     
     pub fn backward(&self, input: &Array2<f32>, grad_output: &Array1<f32>) -> EmbeddingGrads {
-        let grad_input = self.layer.weights.t().dot(grad_output);
-        let grad_weights = input.dot(grad_output);
+        let grad_output_2d = grad_output.clone().insert_axis(Axis(0));
+        println!("back \t{:?} {:?}", grad_output_2d.shape(),  self.layer.weights.shape());
+        let grad_input = grad_output_2d.dot(&self.layer.weights.t()); 
+        let grad_weights = input.t().dot(&grad_output_2d);
         let grad_bias = grad_output.clone();
 
-        (grad_weights, grad_bias, grad_input)
+        (grad_weights, grad_bias, grad_input.remove_axis(Axis(0)))
     }
 
     pub fn update(&mut self, grad_weights: &Array2<f32>, grad_bias: &Array1<f32>, learning_rate: f32) {
+
         self.layer.weights = &self.layer.weights - learning_rate * grad_weights;
         self.layer.bias = &self.layer.bias - learning_rate * grad_bias;
     }
