@@ -35,22 +35,31 @@ impl Embedding {
         Embedding { embedding_size, input_size, layer: EmbeddingLayer { weights, bias } }
     }
 
+   pub fn one_hot(&self, token: usize) -> Array1<f32> {
+        let mut one_hot = Array1::zeros(self.input_size);
+        one_hot[token] = 1.0;
+        one_hot
+    }
+
     pub fn forward(&self, value: &Array1<f32>) -> Array1<f32> {
         self.layer.weights.dot(value) + &self.layer.bias
     } 
     
-    pub fn backward(&self, input: &Array2<f32>, grad_output: &Array1<f32>) -> EmbeddingGrads {
-        let grad_output_2d = grad_output.clone().insert_axis(Axis(0));
-        println!("back \t{:?} {:?}", grad_output_2d.shape(),  self.layer.weights.shape());
-        let grad_input = grad_output_2d.dot(&self.layer.weights.t()); 
-        let grad_weights = input.t().dot(&grad_output_2d);
-        let grad_bias = grad_output.clone();
+    pub fn backward(&self, input: &Array1<f32>, grad_output: &Array1<f32>) -> EmbeddingGrads {
+        let grad_output_2d = input.clone().insert_axis(Axis(0));
+        let grad_weights = grad_output.clone().insert_axis(Axis(1)).dot(&grad_output_2d);
+        
+        //println!("grad weights: {:?}", grad_weights.t().shape());
 
-        (grad_weights, grad_bias, grad_input.remove_axis(Axis(0)))
+        let grad_bias = grad_output.clone();
+        let grad_input = self.layer.weights.t().dot(grad_output);
+
+
+        (grad_weights, grad_bias, grad_input)
     }
 
     pub fn update(&mut self, grad_weights: &Array2<f32>, grad_bias: &Array1<f32>, learning_rate: f32) {
-
+        //println!("grads: {:?}, weights: {:?}", grad_weights.shape(), self.layer.weights.shape());
         self.layer.weights = &self.layer.weights - learning_rate * grad_weights;
         self.layer.bias = &self.layer.bias - learning_rate * grad_bias;
     }

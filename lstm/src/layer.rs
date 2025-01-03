@@ -27,14 +27,13 @@ fn mse_derivative(prediction: &Array1<f32>, target: &Array1<f32>) -> Array1<f32>
 impl LSTMLayer {
     pub fn new() -> Self {
         let vocab_size = 128;
-        //let input_size = 296;
-        let hidden_size = 32;   
+        let hidden_size = 48;
         let learning_rate = 0.00001;
         
         let token_embedding = Embedding::new(vocab_size, hidden_size);
         let dense_embedding = Embedding::new(hidden_size, vocab_size);
         let cells = std::iter::repeat_with(|| LSTMCell::new(hidden_size, hidden_size))
-            .take(1) // Single layer, but could be expanded for stacked layers
+            .take(3) 
             .collect();
         
         LSTMLayer {
@@ -47,14 +46,6 @@ impl LSTMLayer {
         }
     }
 
-    pub fn embedding(&self, data: &Vec<f32>) -> Vec<Array1<f32>> {
-        data.iter().map(|token| {
-            let mut one_hot = Array1::zeros(self.vocab_size);
-            one_hot[*token as usize] = 1.0;
-            self.token_embedding.forward(&one_hot)
-        }).collect()
-    }
-
     pub fn train(&mut self, batch: &[Vec<f32>]) {
         println!("Forward Started!");
         let mut cached_hs = Vec::new();
@@ -63,8 +54,7 @@ impl LSTMLayer {
         let mut h = Array1::<f32>::zeros(self.hidden_size);
         let mut c = Array1::<f32>::zeros(self.hidden_size);
         for sequence in batch {
-            let tokens = self.embedding(sequence);
-            let (o, hs, cs, next_h, next_c) = self.forward(&tokens, &h, &c);
+            let (o, hs, cs, next_h, next_c) = self.forward(sequence, &h, &c);
             h = next_h;
             c = next_c;
             cached_hs.push(hs);
@@ -82,7 +72,7 @@ impl LSTMLayer {
                 &cached_cs,
                 t
             );
-            self.update(&batch[t], &grads_seq);
+            self.update(&grads_seq);
             total_loss += loss;
         }
        
@@ -93,7 +83,7 @@ impl LSTMLayer {
 
     fn forward(
         &self, 
-        sequence: &Vec<Array1<f32>>,
+        sequence: &Vec<f32>,
         last_h: &Array1<f32>, 
         last_c: &Array1<f32>
     ) -> ( 
@@ -108,16 +98,21 @@ impl LSTMLayer {
         let mut h = last_h.clone();
         let mut c = last_c.clone();
         let mut os = Vec::new();
-        for vec in sequence {
+        for token in sequence {
             let mut hs_x = Vec::new();
             let mut cs_x = Vec::new();
+
+            let one_hot = self.token_embedding.one_hot(*token as usize);
+            let emb = self.token_embedding.forward(&one_hot);
+ 
             for cell in &self.cells {
-                let (new_h, new_c) = cell.forward(vec, &h, &c);
+                let (new_h, new_c) = cell.forward(&emb, &h, &c);
                 h = new_h;
                 c = new_c;
                 hs_x.push(h.clone());
                 cs_x.push(c.clone());
             }
+
             let o = self.dense_embedding.forward(&h);
             hs.push(hs_x);
             cs.push(cs_x);
@@ -149,15 +144,13 @@ impl LSTMLayer {
         for (i, token) in target.iter().enumerate().rev() {
             let mut grads_dx = Array2::zeros((self.cells.len(), self.hidden_size));
             let mut grads_h = Vec::new();
-            
-            let mut one_hot = Array1::zeros(self.vocab_size);
-            one_hot[*token as usize] = 1.0;
+           
+            let one_hot = self.token_embedding.one_hot(*token as usize);
             loss += (&output[i] - &one_hot).mapv(|x| x.powi(2)).sum() / 2.0;
             let loss_x = &output[i] - &one_hot;
             
-            let mut one_hot_d = Array2::<f32>::zeros((self.vocab_size, 1));
-            one_hot_d.column_mut(0).assign(&output[i]);
-            let grads_d = self.dense_embedding.backward(&one_hot_d, &loss_x);
+            let grads_d = self.dense_embedding.backward(&hs[i][0], &loss_x);
+        
             for (j, cell) in self.cells.iter().enumerate() {
                 let (grad_h, dx, new_dc, new_dh) = cell.backward(
                     &hs[i][j], 
@@ -165,8 +158,8 @@ impl LSTMLayer {
                     &prev_hs[i][j], 
                     &prev_cs[i][j], 
                     &grads_d.2, 
-                    &dh, 
-                    &dc,
+                    &dh,
+                    &dc
                 );
                 
                 dh = new_dh;
@@ -174,29 +167,24 @@ impl LSTMLayer {
                 grads_dx.row_mut(j).assign(&dx);
                 grads_h.push(grad_h);
             }
+            
+
 
             let avg_h = average_gradients_over_time(&grads_h);
             let avg_dx = grads_dx.mean_axis(Axis(0)).unwrap();
-            let token_emb = self.token_embedding.forward(&one_hot);
-            let mut one_hot_e = Array2::<f32>::zeros((self.hidden_size, self.vocab_size));
-            one_hot_e.column_mut(*token as usize).assign(&token_emb);
-            let grads_i = self.token_embedding.backward(&one_hot_e, &avg_dx);
-
+            let grads_i = self.token_embedding.backward(&one_hot, &avg_dx);
+        
             grads_seq.push((grads_d, avg_h, grads_i));
         }
 
         (grads_seq, loss / (target.len() as f32))
     }
 
-    fn update(&mut self, tokens: &Vec<f32>,  gradients: &Vec<(EmbeddingGrads, Neurons, EmbeddingGrads)> ) {
+    fn update(&mut self, gradients: &Vec<(EmbeddingGrads, Neurons, EmbeddingGrads)> ) {
         let max_norm: f32 = 2.0;   
         let min_norm: f32 = 0.1;
-        for (i, (g_d, g_h, g_e)) in gradients.iter().enumerate() {
-            let token = tokens[i];
-            let mut one_hot_d = Array2::<f32>::zeros((self.vocab_size, 1));     
-            //println!("{:?}", g_d.0.shape());
-            one_hot_d.column_mut(0).assign(&g_d.0);   
-            self.dense_embedding.update(&one_hot_d, &g_d.1, self.learning_rate);
+        for (g_d, g_h, g_e) in gradients.iter() {
+            self.dense_embedding.update(&g_d.0, &g_d.1, self.learning_rate);
             
             let total_norm = g_h.get_sum().sqrt();
             assert!(!(total_norm.is_nan() || total_norm.is_infinite()), "NOT A NUMBER");
@@ -210,10 +198,7 @@ impl LSTMLayer {
                 cell.update(&clip_h, self.learning_rate);
             }
 
-            let mut one_hot_e = Array2::<f32>::zeros((self.hidden_size, self.vocab_size));
-            //println!("{:?}", g_e.0.shape());
-            one_hot_e.row_mut(token as usize).assign(&g_e.0);  
-            self.token_embedding.update(&one_hot_e, &g_e.1, self.learning_rate);
+            self.token_embedding.update(&g_e.0, &g_e.1, self.learning_rate);
        }
     }
 
