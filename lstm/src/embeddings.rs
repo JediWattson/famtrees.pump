@@ -1,66 +1,48 @@
-use ndarray::{Array1, Array2, Axis};
-use ndarray_rand::rand_distr::Uniform;
-use ndarray_rand::RandomExt;
+use arrayfire::{randu, transpose, matmul, dim4, Array, MatProp};
 
-fn outer(a: &Array1<f32>, b: &Array1<f32>) -> Array2<f32> {
-    let m = a.len();
-    let n = b.len();
-    let mut result = Array2::zeros((m, n));
-    for i in 0..m {
-        for j in 0..n {
-            result[[i, j]] = a[i] * b[j];
-        }
-    }
-    result
-}
-
-pub type EmbeddingGrads = (Array2<f32>, Array1<f32>, Array1<f32>); 
+pub type EmbeddingGrads = (Array<f64>, Array<f64>, Array<f64>); 
 
 #[derive(Clone)]
 pub struct EmbeddingLayer {
-    weights: Array2<f32>,
-    bias: Array1<f32>,
+    weights: Array<f64>,
+    bias: Array<f64>,
 }
 
 pub struct Embedding {
    layer: EmbeddingLayer,
-   embedding_size: usize,
-   input_size: usize
+   input_size: u64
 }
 
 impl Embedding {
-    pub fn new(input_size: usize, embedding_size: usize) -> Self {
-        let weights = Array2::random((embedding_size, input_size), Uniform::new(-0.1, 0.1));
-        let bias = Array1::random(embedding_size, Uniform::new(-0.1, 0.1));
-        Embedding { embedding_size, input_size, layer: EmbeddingLayer { weights, bias } }
+    pub fn new(input_size: u64, embedding_size: u64) -> Self {
+        let weights = randu::<f64>(dim4!(embedding_size, input_size));
+        let bias =  randu::<f64>(dim4!(embedding_size));
+        Embedding { input_size, layer: EmbeddingLayer { weights, bias } }
     }
 
-   pub fn one_hot(&self, token: usize) -> Array1<f32> {
-        let mut one_hot = Array1::zeros(self.input_size);
-        one_hot[token] = 1.0;
-        one_hot
+   pub fn one_hot(&self, token: usize) -> Array<f64> {
+        let mut one_vec = vec![0.0; self.input_size as usize];
+        one_vec[token] = 1.0;
+        Array::new(&one_vec, dim4!(self.input_size))
     }
 
-    pub fn forward(&self, value: &Array1<f32>) -> Array1<f32> {
-        self.layer.weights.dot(value) + &self.layer.bias
+    pub fn forward(&self, value: &Array<f64>) -> Array<f64> {
+        matmul(&self.layer.weights, &value, MatProp::NONE, MatProp::NONE) + &self.layer.bias
     } 
     
-    pub fn backward(&self, input: &Array1<f32>, grad_output: &Array1<f32>) -> EmbeddingGrads {
-        let grad_output_2d = input.clone().insert_axis(Axis(0));
-        let grad_weights = grad_output.clone().insert_axis(Axis(1)).dot(&grad_output_2d);
-        
-        //println!("grad weights: {:?}", grad_weights.t().shape());
+    pub fn backward(&self, input: &Array<f64>, grad_output: &Array<f64>) -> EmbeddingGrads {
+        let grad_output_t = transpose(&grad_output, false);
+        let grad_weights = matmul(&input, &grad_output_t, MatProp::NONE, MatProp::NONE);
 
         let grad_bias = grad_output.clone();
-        let grad_input = self.layer.weights.t().dot(grad_output);
+        let grad_input = matmul(&transpose(&self.layer.weights, false), grad_output, MatProp::NONE, MatProp::NONE);
 
 
         (grad_weights, grad_bias, grad_input)
     }
 
-    pub fn update(&mut self, grad_weights: &Array2<f32>, grad_bias: &Array1<f32>, learning_rate: f32) {
-        //println!("grads: {:?}, weights: {:?}", grad_weights.shape(), self.layer.weights.shape());
-        self.layer.weights = &self.layer.weights - learning_rate * grad_weights;
+    pub fn update(&mut self, grad_weights: &Array<f64>, grad_bias: &Array<f64>, learning_rate: f64) {
+        self.layer.weights = &self.layer.weights - learning_rate * transpose(grad_weights, false);
         self.layer.bias = &self.layer.bias - learning_rate * grad_bias;
     }
 }

@@ -117,7 +117,7 @@ fn main() {
     let epochs = 100;
     let batch_size = 32;   
     let mut lstm_layer = LSTMLayer::new();
-    let _ = lstm_layer.load_weights("weights.bin");
+    //let _ = lstm_layer.load_weights("weights.bin");
 
     for epoch in 0..epochs {
         for i in batch_size..data.len() {

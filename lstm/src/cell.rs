@@ -1,74 +1,49 @@
-use ndarray::{s, Array1, Array2};
-use ndarray_rand::RandomExt;
-use ndarray_rand::rand_distr::Uniform;
 use std::ops;
+use arrayfire::{sum_all, sum, print, pow2, randu, constant, index, join, moddims, transpose, matmul, tanh, sigmoid, MatProp, Array, Seq, dim4};
 
-fn outer(a: &Array1<f32>, b: &Array1<f32>) -> Array2<f32> {
-    let m = a.len();
-    let n = b.len();
-    let mut result = Array2::zeros((m, n));
-    for i in 0..m {
-        for j in 0..n {
-            result[[i, j]] = a[i] * b[j];
-        }
+fn outer(a: &Array<f64>, b: &Array<f64>) -> Array<f64> {
+    let b_t = transpose(&b, false);
+    matmul(&a, &b_t, MatProp::NONE, MatProp::NONE)
+}
+
+fn t_dot(a: &Array<f64>, b: &Array<f64>) -> Array<f64> {
+    let a_t = transpose(&a, false);
+    matmul(&a_t, &b, MatProp::NONE, MatProp::NONE)
+}
+
+pub fn default(hidden_size: u64, input_size: u64) -> Neurons {
+    let weight_init = || constant(0.0, dim4!(hidden_size, hidden_size + input_size));
+    let bias_init = || constant(0.0, dim4!(hidden_size));
+
+    Neurons {
+        w_f: weight_init(),
+        w_i: weight_init(),
+        w_c: weight_init(),
+        w_o: weight_init(),
+        b_f: bias_init(),
+        b_i: bias_init(),
+        b_c: bias_init(),
+        b_o: bias_init(),
     }
-    result
 }
 
+type GateOutputs = (Array<f64>, Array<f64>, Array<f64>, Array<f64>);
 
-pub fn average_gradients_over_time(gradients: &[Neurons]) -> Neurons {
-    let num_steps = gradients.len() as f32;
-
-    let zero_grad = Neurons {
-        w_f: Array2::zeros(gradients[0].w_f.dim()),
-        w_i: Array2::zeros(gradients[0].w_i.dim()),
-        w_c: Array2::zeros(gradients[0].w_c.dim()),
-        w_o: Array2::zeros(gradients[0].w_o.dim()),
-        b_f: Array1::zeros(gradients[0].b_f.len()),
-        b_i: Array1::zeros(gradients[0].b_i.len()),
-        b_c: Array1::zeros(gradients[0].b_c.len()),
-        b_o: Array1::zeros(gradients[0].b_o.len()),
-    };
-
-    let summed_grads = gradients.iter().fold(zero_grad, |mut acc, grad| {
-        acc.w_f += &grad.w_f;
-        acc.w_i += &grad.w_i;
-        acc.w_c += &grad.w_c;
-        acc.w_o += &grad.w_o;
-        acc.b_f += &grad.b_f;
-        acc.b_i += &grad.b_i;
-        acc.b_c += &grad.b_c;
-        acc.b_o += &grad.b_o;
-        acc
-    });
-    
-    summed_grads / num_steps
-}
-
-
-fn gate_outputs(cell: &Neurons, concat_input: &Array1<f32>) -> (Array1<f32>, Array1<f32>, Array1<f32>, Array1<f32>) {
-    let f = (cell.w_f.dot(concat_input) + &cell.b_f).mapv(|x| 1.0 / (1.0 + (-x).exp()));
-    let i = (cell.w_i.dot(concat_input) + &cell.b_i).mapv(|x| 1.0 / (1.0 + (-x).exp()));
-    let c_tilde = (cell.w_c.dot(concat_input) + &cell.b_c).mapv(|x| x.tanh());
-    let o = (cell.w_o.dot(concat_input) + &cell.b_o).mapv(|x| 1.0 / (1.0 + (-x).exp()));
-    (f, i, c_tilde, o)
-}
-
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct Neurons {
-    w_f: Array2<f32>,
-    w_i: Array2<f32>,
-    w_c: Array2<f32>,
-    w_o: Array2<f32>,
-    b_f: Array1<f32>,
-    b_i: Array1<f32>,
-    b_c: Array1<f32>,
-    b_o: Array1<f32>,
+    w_f: Array<f64>,
+    w_i: Array<f64>,
+    w_c: Array<f64>,
+    w_o: Array<f64>,
+    b_f: Array<f64>,
+    b_i: Array<f64>,
+    b_c: Array<f64>,
+    b_o: Array<f64>,
 }
 
-impl ops::Div<f32> for Neurons {
+impl ops::Div<f64> for Neurons {
     type Output = Neurons;
-    fn div(self, rhs: f32) -> Self::Output { 
+    fn div(self, rhs: f64) -> Self::Output { 
         Neurons {
             w_f: self.w_f / rhs,
             w_i: self.w_i / rhs,
@@ -81,8 +56,21 @@ impl ops::Div<f32> for Neurons {
         }  
 
     }
-
 }
+
+impl ops::AddAssign<Neurons> for Neurons { 
+    fn add_assign(&mut self, rhs: Neurons)  {
+        self.w_f += rhs.w_f;
+        self.w_i += rhs.w_i;
+        self.w_c += rhs.w_c;
+        self.w_o += rhs.w_o;
+        self.b_f += rhs.b_f;
+        self.b_i += rhs.b_i;
+        self.b_c += rhs.b_c;
+        self.b_o += rhs.b_o;
+    }
+}
+
 
 impl Iterator for Neurons {
     type Item = Neurons;
@@ -91,18 +79,19 @@ impl Iterator for Neurons {
 }
 
 impl Neurons {
-    pub fn get_sum(&self) -> f32 {
-        self.w_f.iter().map(|x| x.powi(2)).sum::<f32>()
-        + self.w_i.iter().map(|x| x.powi(2)).sum::<f32>()
-        + self.w_c.iter().map(|x| x.powi(2)).sum::<f32>()
-        + self.w_o.iter().map(|x| x.powi(2)).sum::<f32>()
-        + self.b_f.iter().map(|x| x.powi(2)).sum::<f32>()
-        + self.b_i.iter().map(|x| x.powi(2)).sum::<f32>()
-        + self.b_c.iter().map(|x| x.powi(2)).sum::<f32>()
-        + self.b_o.iter().map(|x| x.powi(2)).sum::<f32>()
-    }
+    pub fn get_sum(&self) -> f64 {
+        sum_all(&pow2(&self.w_f)).0
+        + sum_all(&pow2(&self.w_i)).0
+        + sum_all(&pow2(&self.w_c)).0
+        //+ sum_all(&pow2(&self.w_o)).0
 
-    pub fn clip(&self, clip_coef: f32) -> Neurons {
+        + sum_all(&pow2(&self.b_f)).0
+        + sum_all(&pow2(&self.b_i)).0
+        + sum_all(&pow2(&self.b_c)).0
+        //+ sum_all(&pow2(&self.b_o)).0
+   }
+
+    pub fn clip(&self, clip_coef: f64) -> Neurons {
         Neurons { 
             w_f: &self.w_f * clip_coef,
             w_i: &self.w_i * clip_coef,
@@ -122,9 +111,9 @@ pub struct LSTMCell {
 }
 
 impl LSTMCell {
-    pub fn new(input_size: usize, hidden_size: usize) -> Self {
-        let weight_init = || Array2::random((hidden_size, input_size + hidden_size), Uniform::new(-0.1, 0.1));
-        let bias_init = || Array1::random(hidden_size, Uniform::new(-0.1, 0.1));
+    pub fn new(input_size: u64, hidden_size: u64) -> Self {
+        let weight_init = || randu::<f64>(dim4!(hidden_size, hidden_size + input_size));
+        let bias_init = || randu::<f64>(dim4!(hidden_size));
 
         LSTMCell {
             neurons: Neurons {
@@ -142,44 +131,45 @@ impl LSTMCell {
 
     pub fn forward(
         &self, 
-        x: &Array1<f32>, 
-        prev_h: &Array1<f32>, 
-        prev_c: &Array1<f32>
-    ) -> (Array1<f32>, Array1<f32>) {
-        let neurons = &self.neurons;
-        let concat_input = x.iter().chain(prev_h.iter()).cloned().collect::<Array1<f32>>();
-        let f = (neurons.w_f.dot(&concat_input) + &neurons.b_f).mapv(|x| 1.0 / (1.0 + (-x).exp()));
-        let i = (neurons.w_i.dot(&concat_input) + &neurons.b_i).mapv(|x| 1.0 / (1.0 + (-x).exp()));
-        let o = (neurons.w_o.dot(&concat_input) + &neurons.b_o).mapv(|x| 1.0 / (1.0 + (-x).exp()));
-        let c_tilde = (neurons.w_c.dot(&concat_input) + &neurons.b_c).mapv(|x| x.tanh());
-       
-        let c = f * prev_c + i * c_tilde;
-        let h = o * c.mapv(|x| x.tanh());
+        x: &Array<f64>, 
+        prev_h: &Array<f64>, 
+        prev_c: &Array<f64>
+    ) -> (Array<f64>, Array<f64>) {
+        let concat_input = join(0, x, prev_h);
+        let (f, i, c_tilde, o) = self.gate_outputs(&concat_input);
+        let f = sigmoid(&f);
+        let i = sigmoid(&i);
+        let o = sigmoid(&o);
+        let c_tilde = tanh(&c_tilde);
+
+
+        let c = (f * prev_c) + (i * c_tilde);
+        let h = o * tanh(&c);
 
         (h, c)
     }
 
     pub fn backward(
         &self,
-        x: &Array1<f32>,
-        c: &Array1<f32>,
-        prev_h: &Array1<f32>,
-        prev_c: &Array1<f32>,
-        loss: &Array1<f32>,
-        next_dh: &Array1<f32>,
-        next_dc: &Array1<f32>,
-    ) -> (Neurons, Array1<f32>, Array1<f32>, Array1<f32>) {
-        let concat_input = x.iter().chain(prev_h.iter()).cloned().collect::<Array1<f32>>();
-        let (f, i, c_tilde, o) = gate_outputs(&self.neurons, &concat_input);
-    
-        let dh_dc = o * (1.0 - c.mapv(|x| x.tanh() * x.tanh()));
+        x: &Array<f64>,
+        c: &Array<f64>,
+        prev_h: &Array<f64>,
+        prev_c: &Array<f64>,
+        loss: &Array<f64>,
+        next_dh: &Array<f64>,
+        next_dc: &Array<f64>,
+    ) -> (Neurons, Array<f64>, Array<f64>, Array<f64>) {
+        let concat_input = join(0, x, prev_h);
+        let (f, i, c_tilde, o) = self.gate_outputs(&concat_input);
+        let dc_new = next_dc + next_dh * &o * (1.0 - tanh(&c) * tanh(&c));
+
+        let dh_dc = &o * (1.0 - tanh(&c));
         let dc = (next_dc * &f) + (loss + next_dh) * dh_dc;
 
-        // Gradient of loss with respect to gates
-        let df = &dc * prev_c;
-        let di = &dc * c_tilde;
-        let dc_tilde = &dc * i;
-        let do_ = (next_dh + loss) * c.mapv(|x| 1.0 - x.tanh() * x.tanh()); 
+        let df = &dc_new * prev_c * &f * (1.0 - &f); // Derivative of sigmoid and multiplication by c_prev
+        let di = &dc_new * &c_tilde * &i * (1.0 - &i);
+        let dc_tilde = dc_new * i * (1.0 - &c_tilde * &c_tilde); // Derivative of tanh
+        let do_ = next_dh * tanh(&c) * &o * (1.0 - &o);
 
         // Compute gradients for weights and biases
         let dw_f = outer(&df, &concat_input);
@@ -188,12 +178,12 @@ impl LSTMCell {
         let dw_o = outer(&do_, &concat_input);
 
         // Gradient with respect to input (for backpropagation)
-        let dx = self.neurons.w_f.t().dot(&df) 
-            + self.neurons.w_i.t().dot(&di) 
-            + self.neurons.w_c.t().dot(&dc_tilde) 
-            + self.neurons.w_o.t().dot(&do_);
-        
-        let input_size = self.neurons.w_f.ncols() - self.neurons.w_f.nrows();
+        let dx = t_dot(&self.neurons.w_f, &df)
+            + t_dot(&self.neurons.w_i, &di)
+            + t_dot(&self.neurons.w_c, &dc_tilde)
+            + t_dot(&self.neurons.w_o, &do_);
+       
+        let input_size = self.neurons.w_f.dims()[0]; // - self.neurons.w_f.dims()[1];
 
         (
             Neurons {
@@ -201,18 +191,18 @@ impl LSTMCell {
                 w_i: dw_i,
                 w_c: dw_c,
                 w_o: dw_o,
-                b_f: df,
-                b_i: di,
-                b_c: dc_tilde,
-                b_o: do_,
+                b_f: sum(&df, 1),
+                b_i: sum(&di, 1),
+                b_c: sum(&dc_tilde, 1),
+                b_o: sum(&do_, 1),
             },
-            dx.slice(s![..input_size]).to_owned(), 
+            index(&dx, &[Seq::new(0.0, (input_size - 1) as f64, 1.0), Seq::default()]),
             f * dc,
-            dx.slice(s![input_size..]).to_owned()
+            index(&dx, &[Seq::new(input_size as f64, -1.0, 1.0), Seq::default()])
         )
     }
 
-    pub fn update(&mut self, grad: &Neurons, learning_rate: f32) {
+    pub fn update(&mut self, grad: &Neurons, learning_rate: f64) {
         let neurons = &mut self.neurons;
         // Update weights
         neurons.w_f = &neurons.w_f - learning_rate * &grad.w_f;
@@ -227,17 +217,15 @@ impl LSTMCell {
         neurons.b_o = &neurons.b_o - learning_rate * &grad.b_o;
     }
     
-    pub fn save(&self) -> Vec<Array2<f32>>  {
-        let cell = &self.neurons;
-        vec![cell.w_f.clone(), cell.w_i.clone(), cell.w_c.clone(), cell.w_o.clone()]
-    }
+    fn gate_outputs(&self, concat_input: &Array<f64>) -> GateOutputs {
+        let neurons = &self.neurons;
 
-    pub fn load(&mut self, layer_weights: &Vec<Array2<f32>>) {
-        let cell = &mut self.neurons;
-        cell.w_f = layer_weights[0].clone();
-        cell.w_i = layer_weights[1].clone();
-        cell.w_c = layer_weights[2].clone();
-        cell.w_o = layer_weights[3].clone();
+        let f =  matmul(&neurons.w_f, &concat_input, MatProp::NONE, MatProp::NONE) + &neurons.b_f;
+        let i = matmul(&neurons.w_i, &concat_input, MatProp::NONE, MatProp::NONE) + &neurons.b_i;
+        let o = matmul(&neurons.w_o, &concat_input, MatProp::NONE, MatProp::NONE) + &neurons.b_o;
+        let c_tilde = matmul(&neurons.w_c, &concat_input, MatProp::NONE, MatProp::NONE) + &neurons.b_c; 
+        
+        (f, i, c_tilde, o)
     }
 }
 
